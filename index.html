@@ -1,6 +1,11 @@
 <!DOCTYPE html>
 <html lang="zh-TW">
 <head>
+<link rel="manifest" href="manifest.json">
+<meta name="theme-color" content="#007bff">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-title" content="AI點名">
+<link rel="apple-touch-icon" href="icon-192.png">
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>AI 背面點名系統 v4</title>
@@ -870,6 +875,9 @@ updateSeatList();
 setMode('seat');
 initDB().then(loadHistory);
 loadOpenCV();
+</script>
+<script>
+  if ('serviceWorker' in navigator) navigator.serviceWorker.register('sw.js');
 </script>
 </body>
 </html>
