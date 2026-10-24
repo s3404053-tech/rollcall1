@@ -1,11 +1,6 @@
 <!DOCTYPE html>
 <html lang="zh-TW">
 <head>
-<link rel="manifest" href="manifest.json">
-<meta name="theme-color" content="#007bff">
-<meta name="apple-mobile-web-app-capable" content="yes">
-<meta name="apple-mobile-web-app-title" content="AI點名">
-<link rel="apple-touch-icon" href="icon-192.png">
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>AI 自動點名系統 </title>
@@ -194,6 +189,11 @@ function saveSeats() {
   } catch (e) {}
 }
 
+/* 點擊檔案框時才清空 value，讓同一個檔案可以重複選取；選檔後檔名會保留顯示 */
+['upload-ref', 'upload-json', 'upload-img'].forEach(id => {
+  $(id).addEventListener('click', e => { e.target.value = ''; });
+});
+
 /* ================= 0. 啟動：載入設定、基準照、座位 ================= */
 (function init() {
   const d = new Date(); d.setMinutes(d.getMinutes() - d.getTimezoneOffset());
@@ -288,7 +288,6 @@ $('upload-ref').addEventListener('change', async e => {
   } catch (err) {
     $('ref-state').innerText = '✅ 基準照已載入（檔案太大，未能記住）';
   }
-  e.target.value = '';
   refresh();
 });
 
@@ -359,7 +358,6 @@ $('btn-clear').onclick = () => { if (confirm('確定清空所有座位？')) { s
 $('btn-export').onclick = () => {
   if (!seats.length) return alert('請先標定座位');
   const data = seats.map(s => ({ id: s.id, x_min: s.x_min, x_max: s.x_max, y_min: s.y_min, y_max: s.y_max }));
-  downloadCSV ? null : null;
   const a = document.createElement('a');
   a.href = URL.createObjectURL(new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' }));
   a.download = 'seats_config.json'; document.body.appendChild(a); a.click(); a.remove();
@@ -378,14 +376,12 @@ $('upload-json').addEventListener('change', e => {
     } catch (err) { alert('JSON 讀取失敗：' + err.message); }
   };
   reader.readAsText(f);
-  e.target.value = '';
 });
 
 /* ================= 6. 今日照片 ================= */
 $('upload-img').addEventListener('change', async e => {
   const f = e.target.files[0]; if (!f) return;
   processToday(toCanvas(await fileToImage(f)));
-  e.target.value = '';
 });
 
 let camStream = null;
@@ -837,7 +833,6 @@ $('export-all').addEventListener('click', async () => {
 });
 
 /* ================= 12. Google Sheet + LINE（經由 Apps Script） ================= */
-$('gs-url').addEventListener('change', () => {});
 $('save-gs').addEventListener('click', async () => {
   const url = $('gs-url').value.trim();
   if (!/^https:\/\/script\.google\.com\/macros\/s\/.+\/exec/.test(url))
@@ -875,9 +870,6 @@ updateSeatList();
 setMode('seat');
 initDB().then(loadHistory);
 loadOpenCV();
-</script>
-<script>
-  if ('serviceWorker' in navigator) navigator.serviceWorker.register('sw.js');
 </script>
 </body>
 </html>
