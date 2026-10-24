@@ -1,0 +1,875 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>AI 背面點名系統 v4</title>
+<script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@4.22.0/dist/tf.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@tensorflow-models/coco-ssd@2.2.3/dist/coco-ssd.min.js"></script>
+<style>
+  body{font-family:"Microsoft JhengHei",Arial,sans-serif;margin:16px;background:#f4f4f9;color:#333}
+  h2{color:#4a4a4a;margin:6px 0}
+  .tab{background:#adb5bd;margin-left:0}
+  .tab.active{background:#007bff}
+  .box{background:#fff;padding:14px;border-radius:8px;margin-bottom:12px;box-shadow:0 1px 3px rgba(0,0,0,.1)}
+  .row{margin-top:8px}
+  .small{font-size:12px;color:#666}
+  button{padding:8px 12px;font-size:14px;color:#fff;border:none;border-radius:4px;cursor:pointer;margin:4px 4px 0 0;background:#007bff}
+  button:disabled{background:#ccc!important;cursor:not-allowed}
+  .container{display:flex;gap:16px;flex-wrap:wrap;align-items:flex-start}
+  .canvas-wrap{border:2px solid #333;background:#fff;flex:1 1 560px;max-width:900px}
+  #main-canvas{display:block;width:100%;height:auto;cursor:crosshair;touch-action:none}
+  .panel{flex:1 1 340px;min-width:300px;background:#fff;padding:14px;border-radius:8px;box-shadow:0 2px 4px rgba(0,0,0,.1)}
+  table{width:100%;border-collapse:collapse;margin-top:8px;font-size:14px}
+  th,td{border:1px solid #ddd;padding:6px;text-align:center}
+  th{background:#f2f2f2}
+  .ok{color:green;font-weight:bold}.no{color:#d00;font-weight:bold}.warn{color:#e67e00;font-weight:bold}
+  #status{color:#ff9800;font-weight:bold;margin:6px 0;min-height:1.2em}
+  #seat-list{list-style:none;padding:0;margin:8px 0 0;max-height:340px;overflow-y:auto;border:1px solid #ddd}
+  #seat-list li{display:flex;justify-content:space-between;padding:5px 8px;border-bottom:1px solid #eee;font-size:14px}
+  #seat-list .x{color:#d00;cursor:pointer;font-weight:bold}
+  #seat-list .nm{cursor:pointer;text-decoration:underline dotted}
+  input[type=text],input[type=date],select{padding:5px}
+</style>
+</head>
+<body>
+<h2>AI 背面點名系統 v4</h2>
+<div class="small">流程：① 上傳空椅子基準照並框選座位 → ② 上傳今日照片 → AI 點名 → 存檔／Google Sheet／LINE</div>
+
+<div class="row">
+  <button id="tab-seat" class="tab active">① 標定座位</button>
+  <button id="tab-check" class="tab">② 點名</button>
+</div>
+
+<!-- ============ 第 1 區：標定座位 ============ -->
+<section id="sec-seat" class="box">
+  <div class="row"><b>基準照（同一相機、空椅子的照片）：</b>
+    <input type="file" id="upload-ref" accept="image/*"> <span id="ref-state" class="small"></span></div>
+  <div class="row">在下方照片上<b>按住滑鼠（或手指）拖拉</b>框出一個座位，放開後輸入座位名稱（例如 01）。</div>
+  <div class="row">
+    <button id="btn-undo" style="background:#6c757d">↶ 復原上一個</button>
+    <button id="btn-clear" style="background:#dc3545">清空全部</button>
+    <button id="btn-export" style="background:#17a2b8">匯出座位 JSON</button>
+    <label class="small">匯入座位 JSON：<input type="file" id="upload-json" accept=".json"></label>
+  </div>
+  <div class="small">座位會自動儲存在此瀏覽器，下次開啟會自動載入。點左側清單的名稱可以改名。</div>
+</section>
+
+<!-- ============ 第 2 區：點名 ============ -->
+<section id="sec-check" class="box" style="display:none">
+  <div class="row"><b>今日上課背面照片：</b>
+    <input type="file" id="upload-img" accept="image/*" disabled>
+    <button id="open-cam" disabled style="background:#6f42c1">📷 Webcam 拍照</button></div>
+  <div id="cam-box" style="display:none;margin-top:10px">
+    相機：<select id="cam-select"></select><br>
+    <video id="cam-video" autoplay playsinline muted style="max-width:640px;width:100%;background:#000;border-radius:6px;margin-top:6px"></video><br>
+    <button id="cam-shot" style="background:#dc3545">📸 拍照並點名</button>
+    <button id="cam-close" style="background:#6c757d">關閉相機</button>
+    <span id="cam-msg" style="color:#d00;font-size:13px"></span>
+  </div>
+  <div class="row">
+    <label><input type="checkbox" id="opt-align" checked> 自動角度校正</label>　
+    <label><input type="checkbox" id="opt-color" checked> 自動色調校正</label>　
+    <label>AI 靈敏度
+      <select id="opt-score">
+        <option value="0.2">高（較多誤報）</option>
+        <option value="0.25" selected>標準</option>
+        <option value="0.35">低（較少誤報）</option>
+      </select></label>
+  </div>
+  <div class="row">前景差異門檻 <input type="range" id="fg-th" min="0.08" max="0.4" step="0.01" value="0.2">
+    <b id="fg-val">0.20</b> <span class="small">（拖動後立即重新判定，不必重跑 AI）</span></div>
+</section>
+
+<div id="status"></div>
+<div class="small" id="cv-note"></div>
+<div class="small" id="align-info"></div>
+
+<div class="container">
+  <div class="canvas-wrap"><canvas id="main-canvas" width="800" height="450"></canvas></div>
+
+  <!-- 標定面板 -->
+  <div class="panel" id="panel-seat">
+    <h3>已標定座位（<span id="seat-count">0</span>）</h3>
+    <ul id="seat-list"></ul>
+  </div>
+
+  <!-- 點名面板 -->
+  <div class="panel" id="panel-check" style="display:none">
+    <h3>點名統計報表</h3>
+    <div>AI 偵測人數：<span id="det-count">-</span>　出席：<span id="present-count" class="ok">0</span> / <span id="total-count">0</span></div>
+    <div class="warn" id="unsure-list" style="margin-top:6px"></div>
+
+    <div class="row">班級：<select id="class-name">
+        <option value="">-- 請選擇班級 --</option>
+        <option>資料一真</option><option>資料一善</option>
+        <option>資料三真</option><option>資料三善</option>
+      </select>　日期：<input type="date" id="roll-date"></div>
+
+    <div class="row">Apps Script 網址：<br>
+      <input type="text" id="gs-url" placeholder="https://script.google.com/macros/s/.../exec" style="width:96%"></div>
+
+    <div class="row">
+      <button id="save-db" style="background:#007bff" disabled>💾 存入資料庫</button>
+      <button id="save-gs" style="background:#0f9d58" disabled>📊 上傳 Google Sheet + LINE</button>
+      <button id="download-csv" style="background:#28a745" disabled>匯出本次 CSV</button>
+      <button id="reset-manual" style="background:#6c757d" disabled>清除手動修正</button>
+    </div>
+    <label class="small"><input type="checkbox" id="line-notify" checked> 同時傳送 LINE 通知</label>
+    <div id="save-msg" style="margin-top:6px;font-size:13px"></div>
+    <div class="small">💡 點擊畫面上的座位可手動切換出席／缺席（標 ✋）。</div>
+
+    <table id="report-table">
+      <thead><tr><th>座位</th><th>狀態</th><th>AI偵測</th><th>前景%</th></tr></thead>
+      <tbody></tbody>
+    </table>
+  </div>
+</div>
+
+<div class="box" id="history-box" style="margin-top:16px">
+  <h3>📚 歷史點名紀錄 <small id="db-mode" class="small"></small></h3>
+  <button id="export-all" style="background:#6c757d">匯出全部歷史 (CSV)</button>
+  <button id="clear-db" style="background:#dc3545">清空資料庫</button>
+  <table id="history-table">
+    <thead><tr><th>日期</th><th>班級</th><th>出席/總數</th><th>缺席名單</th><th>刪除</th></tr></thead>
+    <tbody></tbody>
+  </table>
+</div>
+
+<script>
+/* ================= 全域設定與狀態 ================= */
+const $ = id => document.getElementById(id);
+const canvas = $('main-canvas'), ctx = canvas.getContext('2d');
+const SEAT_KEY = 'v4Seats', REF_KEY = 'v4RefPhoto', LS_KEY = 'attendanceRecords';
+const MATCH_MAX = 0.8;
+// OpenCV 備用來源（依序嘗試）
+const CV_URLS = [
+  'https://cdn.jsdelivr.net/npm/@techstark/opencv-js@4.10.0-release.1/dist/opencv.js',
+  'https://unpkg.com/@techstark/opencv-js@4.10.0-release.1/dist/opencv.js'
+];
+
+let cocoModel = null, cvReady = false, busy = false, analyzed = false, mode = 'seat';
+let seats = [];            // {id,x_min,x_max,y_min,y_max,det,fg,manual}（座標為 0~1 比例）
+let refCanvas = null;      // 基準照
+let alignedCanvas = null;  // 今日照片對齊校正後的畫面
+let lastPeople = [];       // AI 偵測到的人（對齊後座標）
+let drag = null, downPos = null;
+
+const FG = () => parseFloat($('fg-th').value);
+const tick = () => new Promise(r => setTimeout(r, 30));
+const setStatus = t => { $('status').innerText = t; };
+const clamp = v => Math.min(1, Math.max(0, v));
+const normSeat = s => ({ id: String(s.id), x_min: s.x_min, x_max: s.x_max, y_min: s.y_min, y_max: s.y_max, det: false, fg: 0, manual: null });
+
+function toCanvas(src, maxW = 1280) {
+  const w = src.naturalWidth || src.videoWidth || src.width;
+  const h = src.naturalHeight || src.videoHeight || src.height;
+  const k = Math.min(1, maxW / w);
+  const c = document.createElement('canvas');
+  c.width = Math.round(w * k); c.height = Math.round(h * k);
+  c.getContext('2d').drawImage(src, 0, 0, c.width, c.height);
+  return c;
+}
+function resizeTo(src, W, H) {
+  const c = document.createElement('canvas'); c.width = W; c.height = H;
+  c.getContext('2d').drawImage(src, 0, 0, W, H);
+  return c;
+}
+function fileToImage(file) {
+  return new Promise((res, rej) => {
+    const im = new Image(), url = URL.createObjectURL(file);
+    im.onload = () => { URL.revokeObjectURL(url); res(im); };
+    im.onerror = () => rej(new Error('圖片讀取失敗'));
+    im.src = url;
+  });
+}
+function saveSeats() {
+  try {
+    localStorage.setItem(SEAT_KEY, JSON.stringify(seats.map(s => ({ id: s.id, x_min: s.x_min, x_max: s.x_max, y_min: s.y_min, y_max: s.y_max }))));
+  } catch (e) {}
+}
+
+/* ================= 0. 啟動：載入設定、基準照、座位 ================= */
+(function init() {
+  const d = new Date(); d.setMinutes(d.getMinutes() - d.getTimezoneOffset());
+  $('roll-date').value = d.toISOString().slice(0, 10);
+  try {
+    $('class-name').value = localStorage.getItem('lastClass') || '';
+    $('gs-url').value = localStorage.getItem('gsUrl') || '';
+    $('line-notify').checked = localStorage.getItem('lineNotify') !== '0';
+    seats = JSON.parse(localStorage.getItem(SEAT_KEY) || '[]').map(normSeat);
+  } catch (e) { seats = []; }
+  $('class-name').addEventListener('change', () => { try { localStorage.setItem('lastClass', $('class-name').value); } catch (e) {} });
+  $('gs-url').addEventListener('change', () => { try { localStorage.setItem('gsUrl', $('gs-url').value.trim()); } catch (e) {} });
+  $('line-notify').addEventListener('change', () => { try { localStorage.setItem('lineNotify', $('line-notify').checked ? '1' : '0'); } catch (e) {} });
+
+  let saved = null; try { saved = localStorage.getItem(REF_KEY); } catch (e) {}
+  if (saved) {
+    const im = new Image();
+    im.onload = () => { refCanvas = toCanvas(im); $('ref-state').innerText = '✅ 已載入上次的基準照'; refresh(); };
+    im.src = saved;
+  }
+})();
+
+/* ================= 1. 載入 AI 模型 ================= */
+(async function loadAIModel() {
+  try {
+    if (typeof cocoSsd === 'undefined') throw new Error('無法載入 COCO-SSD（請確認網路）');
+    setStatus('⏳ 載入 AI 模型中...');
+    cocoModel = await cocoSsd.load({ base: 'mobilenet_v2' });
+    setStatus('✅ AI 模型載入完成');
+  } catch (e) {
+    setStatus('❌ AI 模型載入失敗：' + e.message);
+  }
+  updateEnable();
+})();
+
+/* ================= 2. 載入 OpenCV（失敗不影響點名） ================= */
+function loadOpenCV() {
+  $('cv-note').innerText = '⏳ 正在載入 OpenCV（角度／色調校正）...';
+  let i = 0;
+  const next = () => {
+    if (i >= CV_URLS.length) {
+      $('cv-note').innerText = '⚠️ OpenCV 無法載入：將略過角度與色調校正，仍可點名（準確度較低）。';
+      return;
+    }
+    const s = document.createElement('script');
+    s.src = CV_URLS[i++]; s.async = true;
+    s.onerror = next;
+    const t0 = Date.now(); let waiting = false;
+    const timer = setInterval(() => {
+      if (window.cv && typeof window.cv.then === 'function' && !waiting) {
+        waiting = true; window.cv.then(v => { window.cv = v; });
+      }
+      if (window.cv && window.cv.Mat) {
+        clearInterval(timer); cvReady = true;
+        $('cv-note').innerText = '✅ OpenCV 就緒（角度與色調校正可用）';
+        updateEnable();
+      } else if (Date.now() - t0 > 60000) {
+        clearInterval(timer); next();
+      }
+    }, 300);
+    document.head.appendChild(s);
+  };
+  next();
+}
+
+/* ================= 3. 分頁切換 ================= */
+function setMode(m) {
+  mode = m;
+  $('tab-seat').classList.toggle('active', m === 'seat');
+  $('tab-check').classList.toggle('active', m === 'check');
+  $('sec-seat').style.display = m === 'seat' ? 'block' : 'none';
+  $('sec-check').style.display = m === 'check' ? 'block' : 'none';
+  $('panel-seat').style.display = m === 'seat' ? 'block' : 'none';
+  $('panel-check').style.display = m === 'check' ? 'block' : 'none';
+  refresh();
+}
+$('tab-seat').onclick = () => setMode('seat');
+$('tab-check').onclick = () => {
+  if (!refCanvas) return alert('請先在「① 標定座位」上傳基準照');
+  if (!seats.length) return alert('請先標定座位');
+  setMode('check');
+};
+
+/* ================= 4. 基準照上傳 ================= */
+$('upload-ref').addEventListener('change', async e => {
+  const f = e.target.files[0]; if (!f) return;
+  refCanvas = toCanvas(await fileToImage(f));
+  alignedCanvas = null; analyzed = false; lastPeople = [];
+  try {
+    localStorage.setItem(REF_KEY, refCanvas.toDataURL('image/jpeg', 0.85));
+    $('ref-state').innerText = '✅ 基準照已載入並記住';
+  } catch (err) {
+    $('ref-state').innerText = '✅ 基準照已載入（檔案太大，未能記住）';
+  }
+  e.target.value = '';
+  refresh();
+});
+
+/* ================= 5. 座位標定（滑鼠／觸控拖拉） ================= */
+function pos(e) {
+  const r = canvas.getBoundingClientRect();
+  return { x: clamp((e.clientX - r.left) / r.width), y: clamp((e.clientY - r.top) / r.height) };
+}
+function seatAt(x, y) {
+  return seats.find(s => x >= s.x_min && x <= s.x_max && y >= s.y_min && y <= s.y_max);
+}
+canvas.addEventListener('pointerdown', e => {
+  if (!refCanvas) return;
+  const p = pos(e); downPos = p;
+  if (mode === 'seat') {
+    drag = { x0: p.x, y0: p.y, x1: p.x, y1: p.y };
+    canvas.setPointerCapture(e.pointerId);
+    drawAll();
+  }
+});
+canvas.addEventListener('pointermove', e => {
+  if (!drag) return;
+  const p = pos(e); drag.x1 = p.x; drag.y1 = p.y; drawAll();
+});
+canvas.addEventListener('pointercancel', () => { drag = null; downPos = null; drawAll(); });
+canvas.addEventListener('pointerup', e => {
+  if (!downPos) return;
+  const p = pos(e), d = downPos; downPos = null;
+
+  if (mode === 'seat' && drag) {
+    drag = null;
+    const x_min = Math.min(d.x, p.x), x_max = Math.max(d.x, p.x);
+    const y_min = Math.min(d.y, p.y), y_max = Math.max(d.y, p.y);
+    if (x_max - x_min < 0.02 || y_max - y_min < 0.02) { drawAll(); return; }   // 誤觸太小的框
+    const id = prompt('請輸入此座位的名稱或學號（例如 01）：');
+    if (id && id.trim()) {
+      seats.push({ id: id.trim(), x_min, x_max, y_min, y_max, det: false, fg: 0, manual: null });
+      saveSeats();
+    }
+    refresh();
+    return;
+  }
+
+  if (mode === 'check' && analyzed) {
+    if (Math.abs(p.x - d.x) > 0.01 || Math.abs(p.y - d.y) > 0.01) return;   // 拖動不算點擊
+    const s = seatAt(p.x, p.y); if (!s) return;
+    s.manual = stateOf(s) === 'present' ? false : true;
+    refresh();
+  }
+});
+
+function updateSeatList() {
+  $('seat-count').innerText = seats.length;
+  const ul = $('seat-list'); ul.innerHTML = '';
+  seats.forEach((s, i) => {
+    const li = document.createElement('li');
+    li.innerHTML = `<span class="nm" title="點擊改名">座位 <b>${s.id}</b></span><span class="x" title="刪除">❌</span>`;
+    li.querySelector('.nm').onclick = () => {
+      const n = prompt('新的座位名稱：', s.id);
+      if (n && n.trim()) { s.id = n.trim(); saveSeats(); refresh(); }
+    };
+    li.querySelector('.x').onclick = () => { seats.splice(i, 1); saveSeats(); refresh(); };
+    ul.appendChild(li);
+  });
+}
+$('btn-undo').onclick = () => { if (seats.length) { seats.pop(); saveSeats(); refresh(); } };
+$('btn-clear').onclick = () => { if (confirm('確定清空所有座位？')) { seats = []; saveSeats(); refresh(); } };
+$('btn-export').onclick = () => {
+  if (!seats.length) return alert('請先標定座位');
+  const data = seats.map(s => ({ id: s.id, x_min: s.x_min, x_max: s.x_max, y_min: s.y_min, y_max: s.y_max }));
+  downloadCSV ? null : null;
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' }));
+  a.download = 'seats_config.json'; document.body.appendChild(a); a.click(); a.remove();
+};
+$('upload-json').addEventListener('change', e => {
+  const f = e.target.files[0]; if (!f) return;
+  const reader = new FileReader();
+  reader.onload = ev => {
+    try {
+      let d = JSON.parse(ev.target.result);
+      if (!Array.isArray(d) && Array.isArray(d.seats)) d = d.seats;
+      if (!Array.isArray(d) || !d.length) throw new Error('內容不是座位陣列');
+      d.forEach((s, i) => { if ([s.x_min, s.x_max, s.y_min, s.y_max].some(v => typeof v !== 'number')) throw new Error(`第 ${i + 1} 個座位缺少座標`); });
+      seats = d.map(normSeat); saveSeats(); refresh();
+      alert(`已匯入 ${seats.length} 個座位`);
+    } catch (err) { alert('JSON 讀取失敗：' + err.message); }
+  };
+  reader.readAsText(f);
+  e.target.value = '';
+});
+
+/* ================= 6. 今日照片 ================= */
+$('upload-img').addEventListener('change', async e => {
+  const f = e.target.files[0]; if (!f) return;
+  processToday(toCanvas(await fileToImage(f)));
+  e.target.value = '';
+});
+
+let camStream = null;
+function stopCam() {
+  if (camStream) { camStream.getTracks().forEach(t => t.stop()); camStream = null; }
+  $('cam-video').srcObject = null;
+}
+async function startCam(deviceId) {
+  stopCam(); $('cam-msg').innerText = '';
+  if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) { $('cam-msg').innerText = '❌ 此瀏覽器不支援相機'; return; }
+  try {
+    camStream = await navigator.mediaDevices.getUserMedia({
+      video: deviceId ? { deviceId: { exact: deviceId } } : { width: { ideal: 1280 }, height: { ideal: 720 } }, audio: false
+    });
+    $('cam-video').srcObject = camStream;
+    const cur = camStream.getVideoTracks()[0].getSettings().deviceId;
+    const devs = (await navigator.mediaDevices.enumerateDevices()).filter(d => d.kind === 'videoinput');
+    $('cam-select').innerHTML = devs.map((d, i) =>
+      `<option value="${d.deviceId}" ${d.deviceId === cur ? 'selected' : ''}>${d.label || '相機 ' + (i + 1)}</option>`).join('');
+  } catch (err) {
+    $('cam-msg').innerText = '❌ 無法開啟相機（' + err.name + '）：請確認已允許相機權限';
+  }
+}
+$('open-cam').addEventListener('click', () => { $('cam-box').style.display = 'block'; startCam(); });
+$('cam-select').addEventListener('change', e => startCam(e.target.value));
+$('cam-close').addEventListener('click', () => { stopCam(); $('cam-box').style.display = 'none'; });
+$('cam-shot').addEventListener('click', () => {
+  const v = $('cam-video');
+  if (!camStream || !v.videoWidth) return alert('相機畫面尚未就緒');
+  const c = document.createElement('canvas'); c.width = v.videoWidth; c.height = v.videoHeight;
+  c.getContext('2d').drawImage(v, 0, 0);
+  stopCam(); $('cam-box').style.display = 'none';
+  processToday(toCanvas(c));
+});
+
+/* ================= 7. 主流程 ================= */
+async function processToday(srcCanvas) {
+  if (!seats.length) return alert('請先標定座位');
+  if (!refCanvas) return alert('請先上傳基準照');
+  if (!cocoModel) return alert('AI 模型尚未載入完成，請稍候');
+  busy = true; updateEnable();
+  try {
+    setStatus('① 角度對齊與色調校正中...'); await tick();
+    const info = [];
+    alignedCanvas = prepareFrame(srcCanvas, info);
+    $('align-info').innerText = '對齊／校正：' + info.join('；');
+
+    setStatus('② AI 分塊偵測人體中...'); await tick();
+    lastPeople = await detectPeople(alignedCanvas, parseFloat($('opt-score').value));
+    const matched = matchPeopleToSeats(lastPeople);
+
+    setStatus('③ 座位前景比對中...'); await tick();
+    const ratios = occupancy(alignedCanvas, refCanvas);
+
+    seats.forEach((s, i) => { s.fg = ratios[i]; s.det = matched.has(i); s.manual = null; });
+    analyzed = true;
+    setStatus('✅ 點名完成。綠=出席　紅=缺席　橘=待確認（可點擊座位修正）');
+  } catch (err) {
+    console.error(err);
+    setStatus('❌ 處理失敗：' + err.message);
+  } finally {
+    busy = false; refresh();
+  }
+}
+
+/* ---------- ① 角度對齊與 ② 色調校正（需 OpenCV） ---------- */
+function prepareFrame(src, info) {
+  const W = refCanvas.width, H = refCanvas.height;
+  let out = null;
+  if (cvReady && $('opt-align').checked) {
+    try {
+      const r = alignWithORB(src);
+      if (r) { out = r.canvas; info.push(`角度對齊成功（內點 ${r.inliers}）`); }
+      else info.push('⚠️ 角度對齊失敗（特徵點不足）');
+    } catch (e) { info.push('⚠️ 角度對齊發生錯誤，已略過'); }
+  } else if (!cvReady) info.push('OpenCV 未就緒，略過角度校正');
+  if (!out) out = resizeTo(src, W, H);
+  if (cvReady && $('opt-color').checked) {
+    try { colorTransfer(out, refCanvas); info.push('色調已校正為基準照'); }
+    catch (e) { info.push('色調校正略過'); }
+  }
+  return out;
+}
+
+function alignWithORB(srcC) {
+  const W = refCanvas.width, H = refCanvas.height;
+  const src = cv.imread(srcC), dst = cv.imread(refCanvas);
+  const g1 = new cv.Mat(), g2 = new cv.Mat(), none = new cv.Mat();
+  cv.cvtColor(src, g1, cv.COLOR_RGBA2GRAY);
+  cv.cvtColor(dst, g2, cv.COLOR_RGBA2GRAY);
+  cv.equalizeHist(g1, g1); cv.equalizeHist(g2, g2);
+
+  const orb = new cv.ORB(2000);
+  const kp1 = new cv.KeyPointVector(), kp2 = new cv.KeyPointVector();
+  const d1 = new cv.Mat(), d2 = new cv.Mat();
+  orb.detectAndCompute(g1, none, kp1, d1);
+  orb.detectAndCompute(g2, none, kp2, d2);
+
+  let result = null;
+  if (d1.rows >= 10 && d2.rows >= 10) {
+    const bf = new cv.BFMatcher(cv.NORM_HAMMING, false);
+    const knn = new cv.DMatchVectorVector();
+    bf.knnMatch(d1, d2, knn, 2);
+    const pa = [], pb = [];
+    for (let i = 0; i < knn.size(); i++) {
+      const m = knn.get(i);
+      if (m.size() < 2) continue;
+      const a = m.get(0), b = m.get(1);
+      if (a.distance < 0.75 * b.distance) {
+        const p = kp1.get(a.queryIdx).pt, q = kp2.get(a.trainIdx).pt;
+        pa.push(p.x, p.y); pb.push(q.x, q.y);
+      }
+    }
+    if (pa.length / 2 >= 12) {
+      const S = cv.matFromArray(pa.length / 2, 1, cv.CV_32FC2, pa);
+      const T = cv.matFromArray(pb.length / 2, 1, cv.CV_32FC2, pb);
+      const mask = new cv.Mat();
+      const Hm = cv.findHomography(S, T, cv.RANSAC, 4.0, mask);
+      if (!Hm.empty()) {
+        let inl = 0;
+        for (let i = 0; i < mask.rows; i++) if (mask.data[i]) inl++;
+        if (inl >= 12) {
+          const warped = new cv.Mat();
+          cv.warpPerspective(src, warped, Hm, new cv.Size(W, H), cv.INTER_LINEAR,
+                             cv.BORDER_CONSTANT, new cv.Scalar(0, 0, 0, 255));
+          const c = document.createElement('canvas'); c.width = W; c.height = H;
+          cv.imshow(c, warped);
+          result = { canvas: c, inliers: inl };
+          warped.delete();
+        }
+      }
+      [S, T, mask, Hm].forEach(m => m.delete());
+    }
+    knn.delete(); bf.delete();
+  }
+  [src, dst, g1, g2, none, d1, d2].forEach(m => m.delete());
+  kp1.delete(); kp2.delete(); orb.delete();
+  return result;
+}
+
+function labStats(m) {
+  const d = m.data, n = d.length / 3;
+  const mean = [0, 0, 0], std = [0, 0, 0];
+  for (let i = 0; i < d.length; i += 3) for (let k = 0; k < 3; k++) mean[k] += d[i + k];
+  for (let k = 0; k < 3; k++) mean[k] /= n;
+  for (let i = 0; i < d.length; i += 3) for (let k = 0; k < 3; k++) { const x = d[i + k] - mean[k]; std[k] += x * x; }
+  for (let k = 0; k < 3; k++) std[k] = Math.sqrt(std[k] / n);
+  return { mean, std };
+}
+// Reinhard 色調轉換：把 c 的 Lab 統計量調整為與 refC 一致
+function colorTransfer(c, refC) {
+  const s = cv.imread(c), r = cv.imread(refC);
+  const sRGB = new cv.Mat(), rRGB = new cv.Mat(), sLab = new cv.Mat(), rLab = new cv.Mat(), back = new cv.Mat();
+  cv.cvtColor(s, sRGB, cv.COLOR_RGBA2RGB); cv.cvtColor(sRGB, sLab, cv.COLOR_RGB2Lab);
+  cv.cvtColor(r, rRGB, cv.COLOR_RGBA2RGB); cv.cvtColor(rRGB, rLab, cv.COLOR_RGB2Lab);
+  const sm = labStats(sLab), rm = labStats(rLab);
+  const d = sLab.data;
+  for (let i = 0; i < d.length; i += 3) for (let k = 0; k < 3; k++) {
+    const v = (d[i + k] - sm.mean[k]) * (rm.std[k] / (sm.std[k] || 1)) + rm.mean[k];
+    d[i + k] = v < 0 ? 0 : v > 255 ? 255 : v;
+  }
+  cv.cvtColor(sLab, back, cv.COLOR_Lab2RGB);
+  cv.cvtColor(back, s, cv.COLOR_RGB2RGBA);
+  cv.imshow(c, s);
+  [s, r, sRGB, rRGB, sLab, rLab, back].forEach(m => m.delete());
+}
+
+/* ---------- ③ AI 分塊偵測人體 ---------- */
+async function detectPeople(srcC, minScore) {
+  const W = srcC.width, H = srcC.height, cols = 4, rows = 3;
+  const tw = Math.round(W * 1.5 / cols), th = Math.round(H * 1.5 / rows);
+  const tile = document.createElement('canvas'); tile.width = tw; tile.height = th;
+  const tctx = tile.getContext('2d');
+  const all = []; let n = 0;
+  for (let r = 0; r < rows; r++) for (let c = 0; c < cols; c++) {
+    const x = Math.round(c * (W - tw) / (cols - 1));
+    const y = Math.round(r * (H - th) / (rows - 1));
+    tctx.clearRect(0, 0, tw, th);
+    tctx.drawImage(srcC, x, y, tw, th, 0, 0, tw, th);
+    const preds = await cocoModel.detect(tile, 30, minScore);
+    preds.forEach(p => { if (p.class === 'person') all.push({ bbox: [p.bbox[0] + x, p.bbox[1] + y, p.bbox[2], p.bbox[3]], score: p.score }); });
+    n++; setStatus(`② AI 分塊偵測中（${n}/${rows * cols}）`);
+    await tick();
+  }
+  return nms(all, 0.45);
+}
+function iou(a, b) {
+  const ix = Math.max(0, Math.min(a[0] + a[2], b[0] + b[2]) - Math.max(a[0], b[0]));
+  const iy = Math.max(0, Math.min(a[1] + a[3], b[1] + b[3]) - Math.max(a[1], b[1]));
+  const inter = ix * iy, u = a[2] * a[3] + b[2] * b[3] - inter;
+  return u > 0 ? inter / u : 0;
+}
+function nms(boxes, thr) {
+  boxes.sort((a, b) => b.score - a.score);
+  const keep = [];
+  for (const b of boxes) if (keep.every(k => iou(k.bbox, b.bbox) < thr)) keep.push(b);
+  return keep;
+}
+
+/* ---------- ④ 人 ↔ 座位 一對一配對 ---------- */
+function matchPeopleToSeats(people) {
+  const W = alignedCanvas.width, H = alignedCanvas.height;
+  const cands = [];
+  people.forEach((p, pi) => {
+    const px = p.bbox[0] + p.bbox[2] / 2, py = p.bbox[1] + p.bbox[3] / 2;
+    seats.forEach((s, si) => {
+      const sx = (s.x_min + s.x_max) / 2 * W, sy = (s.y_min + s.y_max) / 2 * H;
+      const size = Math.max((s.x_max - s.x_min) * W, (s.y_max - s.y_min) * H);
+      cands.push({ pi, si, d: Math.hypot(px - sx, py - sy) / size });
+    });
+  });
+  cands.sort((a, b) => a.d - b.d);
+  const usedP = new Set(), res = new Map();
+  for (const c of cands) {
+    if (c.d > MATCH_MAX) break;
+    if (usedP.has(c.pi) || res.has(c.si)) continue;
+    usedP.add(c.pi); res.set(c.si, c.d);
+  }
+  return res;
+}
+
+/* ---------- ⑤ 座位前景比對（與空椅子差異） ---------- */
+function occupancy(alignC, refC) {
+  const W = refC.width, H = refC.height;
+  const a = cv.imread(alignC), r = cv.imread(refC);
+  const ab = new cv.Mat(), rb = new cv.Mat(), diff = new cv.Mat(), gray = new cv.Mat(), bin = new cv.Mat();
+  cv.GaussianBlur(a, ab, new cv.Size(7, 7), 0, 0, cv.BORDER_DEFAULT);
+  cv.GaussianBlur(r, rb, new cv.Size(7, 7), 0, 0, cv.BORDER_DEFAULT);
+  cv.absdiff(ab, rb, diff);
+  cv.cvtColor(diff, gray, cv.COLOR_RGBA2GRAY);
+  cv.threshold(gray, bin, 35, 255, cv.THRESH_BINARY);
+  const out = seats.map(s => {
+    const x1 = Math.max(0, Math.floor(s.x_min * W)), x2 = Math.min(W, Math.ceil(s.x_max * W));
+    const seatH = (s.y_max - s.y_min) * H;
+    const y1 = Math.max(0, Math.floor(s.y_min * H - seatH * 0.3)), y2 = Math.min(H, Math.ceil(s.y_max * H));
+    const w = x2 - x1, h = y2 - y1;
+    if (w <= 0 || h <= 0) return 0;
+    const roi = bin.roi(new cv.Rect(x1, y1, w, h));
+    const ratio = cv.countNonZero(roi) / (w * h);
+    roi.delete();
+    return ratio;
+  });
+  [a, r, ab, rb, diff, gray, bin].forEach(m => m.delete());
+  return out;
+}
+
+/* ================= 8. 判定、繪圖、表格 ================= */
+function stateOf(s) {
+  if (s.manual !== null) return s.manual ? 'present' : 'absent';
+  const T = FG();
+  if (s.fg >= T) return 'present';
+  if (s.det && s.fg >= T * 0.4) return 'present';
+  if (s.det || s.fg >= T * 0.4) return 'unsure';
+  return 'absent';
+}
+
+function refresh() { drawAll(); updateSeatList(); updateTable(); updateEnable(); }
+
+function drawAll() {
+  const base = (mode === 'check' && alignedCanvas) ? alignedCanvas : refCanvas;
+  if (!base) {
+    canvas.width = 800; canvas.height = 450;
+    ctx.fillStyle = '#f0f0f0'; ctx.fillRect(0, 0, 800, 450);
+    ctx.fillStyle = '#666'; ctx.font = '20px Arial';
+    ctx.fillText(mode === 'seat' ? '請先上傳基準照（空椅子的照片）' : '請先標定座位並上傳基準照', 170, 225);
+    return;
+  }
+  canvas.width = base.width; canvas.height = base.height;
+  const W = canvas.width, H = canvas.height;
+  ctx.drawImage(base, 0, 0, W, H);
+
+  const checking = mode === 'check' && analyzed;
+  if (checking) {
+    ctx.save(); ctx.setLineDash([8, 5]); ctx.strokeStyle = '#00bfff'; ctx.lineWidth = 2;
+    lastPeople.forEach(p => ctx.strokeRect(p.bbox[0], p.bbox[1], p.bbox[2], p.bbox[3]));
+    ctx.restore();
+  }
+  const colors = {
+    present: ['#28a745', 'rgba(40,167,69,.25)'],
+    absent:  ['#dc3545', 'rgba(220,53,69,.22)'],
+    unsure:  ['#ff9800', 'rgba(255,152,0,.30)']
+  };
+  seats.forEach(s => {
+    const st = checking ? stateOf(s) : null;
+    const [stroke, fill] = checking ? colors[st] : ['#2196f3', 'rgba(33,150,243,.12)'];
+    const x = s.x_min * W, y = s.y_min * H, w = (s.x_max - s.x_min) * W, h = (s.y_max - s.y_min) * H;
+    ctx.fillStyle = fill; ctx.fillRect(x, y, w, h);
+    ctx.strokeStyle = stroke; ctx.lineWidth = 3; ctx.strokeRect(x, y, w, h);
+    ctx.shadowColor = '#000'; ctx.shadowBlur = 4; ctx.fillStyle = '#fff';
+    ctx.font = 'bold 16px Arial'; ctx.fillText(s.id, x + 5, y + 18);
+    if (checking) {
+      ctx.font = '12px Arial';
+      ctx.fillText(`${(s.fg * 100).toFixed(0)}%${s.det ? ' ●' : ''}${s.manual !== null ? ' ✋' : ''}`, x + 5, y + h - 6);
+    }
+    ctx.shadowBlur = 0;
+  });
+  if (drag) {
+    ctx.strokeStyle = '#007bff'; ctx.lineWidth = 2;
+    ctx.strokeRect(drag.x0 * W, drag.y0 * H, (drag.x1 - drag.x0) * W, (drag.y1 - drag.y0) * H);
+  }
+}
+
+function updateTable() {
+  const tb = document.querySelector('#report-table tbody');
+  tb.innerHTML = '';
+  $('total-count').innerText = seats.length;
+  $('det-count').innerText = analyzed ? lastPeople.length : '-';
+  let n = 0; const unsure = [];
+  seats.forEach(s => {
+    const st = analyzed ? stateOf(s) : 'absent';
+    if (analyzed && st === 'present') n++;
+    if (analyzed && st === 'unsure') unsure.push(s.id);
+    const label = !analyzed ? '未分析'
+      : st === 'present' ? '<span class="ok">出席</span>'
+      : st === 'unsure'  ? '<span class="warn">待確認</span>'
+      : '<span class="no">缺席</span>';
+    const tr = document.createElement('tr');
+    tr.innerHTML = `<td><b>${s.id}</b></td><td>${label}${s.manual !== null ? ' ✋' : ''}</td>
+      <td>${analyzed ? (s.det ? '✔' : '—') : ''}</td><td>${analyzed ? (s.fg * 100).toFixed(0) + '%' : ''}</td>`;
+    tb.appendChild(tr);
+  });
+  if (!seats.length) tb.innerHTML = '<tr><td colspan="4" style="color:#999">尚未標定座位</td></tr>';
+  $('present-count').innerText = n;
+  $('unsure-list').innerText = unsure.length ? `⚠️ 待確認（請點擊畫面座位人工確認）：${unsure.join('、')}` : '';
+}
+
+function updateEnable() {
+  const ready = !!(refCanvas && seats.length && cocoModel);
+  $('upload-img').disabled = busy || !ready;
+  $('open-cam').disabled = busy || !ready;
+  const ok = analyzed && !busy;
+  [$('save-db'), $('save-gs'), $('download-csv'), $('reset-manual')].forEach(b => b.disabled = !ok);
+}
+
+$('reset-manual').addEventListener('click', () => { seats.forEach(s => s.manual = null); refresh(); });
+$('fg-th').addEventListener('input', () => {
+  $('fg-val').innerText = FG().toFixed(2);
+  if (analyzed) refresh();
+});
+
+/* ================= 9. 紀錄與共用資料 ================= */
+function buildRecord() {
+  const st = seats.map(s => ({ id: s.id, state: stateOf(s) }));
+  return {
+    date: $('roll-date').value,
+    className: $('class-name').value.trim() || '(未填)',
+    total: seats.length,
+    present: st.filter(x => x.state === 'present').map(x => x.id),
+    absent: st.filter(x => x.state !== 'present').map(x => x.id),
+    unsure: st.filter(x => x.state === 'unsure').map(x => x.id)
+  };
+}
+function msg(t, color) { $('save-msg').style.color = color || '#333'; $('save-msg').innerText = t; }
+
+/* ================= 10. 瀏覽器資料庫 ================= */
+let db = null, useLS = false;
+const lsGet = () => { try { return JSON.parse(localStorage.getItem(LS_KEY) || '[]'); } catch (e) { return []; } };
+const lsSet = a => localStorage.setItem(LS_KEY, JSON.stringify(a));
+function initDB() {
+  return new Promise(resolve => {
+    try {
+      const req = indexedDB.open('AttendanceDB_v2', 1);
+      req.onupgradeneeded = e => {
+        const d = e.target.result;
+        if (!d.objectStoreNames.contains('attendance')) d.createObjectStore('attendance', { keyPath: 'id', autoIncrement: true });
+      };
+      req.onsuccess = e => { db = e.target.result; try { db.transaction('attendance'); } catch (err) { useLS = true; } resolve(); };
+      req.onerror = req.onblocked = () => { useLS = true; resolve(); };
+    } catch (err) { useLS = true; resolve(); }
+  });
+}
+function idbRun(mode, fn) {
+  return new Promise((res, rej) => {
+    try {
+      const tx = db.transaction('attendance', mode);
+      const req = fn(tx.objectStore('attendance'));
+      tx.oncomplete = () => res(req && req.result);
+      tx.onerror = tx.onabort = () => rej(tx.error);
+    } catch (e) { rej(e); }
+  });
+}
+async function dbAll() { return useLS ? lsGet() : idbRun('readonly', st => st.getAll()); }
+async function dbAdd(r) {
+  if (useLS) { const a = lsGet(); r.id = Date.now(); a.push(r); lsSet(a); return; }
+  await idbRun('readwrite', st => st.add(r));
+}
+async function dbDel(id) {
+  if (useLS) { lsSet(lsGet().filter(x => x.id !== id)); return; }
+  await idbRun('readwrite', st => st.delete(id));
+}
+async function dbClear() {
+  if (useLS) { lsSet([]); return; }
+  await idbRun('readwrite', st => st.clear());
+}
+
+$('save-db').addEventListener('click', async () => {
+  const r = buildRecord();
+  if (!r.date) return alert('請選擇點名日期');
+  if (!$('class-name').value) return alert('請先選擇班級');
+  try {
+    await dbAdd(r);
+    msg(`✅ 已存入資料庫，缺席 ${r.absent.length} 人：${r.absent.join('、') || '無'}`, 'green');
+    await loadHistory();
+    $('history-box').scrollIntoView({ behavior: 'smooth' });
+  } catch (err) { msg('❌ 存入失敗：' + (err && err.message || err), 'red'); }
+});
+
+async function loadHistory() {
+  const tb = document.querySelector('#history-table tbody');
+  let rows = [];
+  try { rows = (await dbAll()).reverse(); }
+  catch (err) { tb.innerHTML = `<tr><td colspan="5" class="no">讀取失敗：${err && err.message || err}</td></tr>`; return; }
+  $('db-mode').innerText = useLS ? '（儲存方式：localStorage）' : '（儲存方式：IndexedDB）';
+  tb.innerHTML = rows.length ? '' : '<tr><td colspan="5" style="color:#999">尚無紀錄</td></tr>';
+  rows.forEach(r => {
+    const tr = document.createElement('tr');
+    tr.innerHTML = `<td>${r.date}</td><td>${r.className}</td><td>${r.present.length}/${r.total}</td>
+      <td class="no">${r.absent.join('、') || '全勤'}</td><td><span style="cursor:pointer;color:red">❌</span></td>`;
+    tr.querySelector('span').onclick = async () => { await dbDel(r.id); loadHistory(); };
+    tb.appendChild(tr);
+  });
+}
+$('clear-db').addEventListener('click', async () => {
+  if (!confirm('確定清空所有歷史紀錄？')) return;
+  await dbClear(); loadHistory();
+});
+
+/* ================= 11. CSV 匯出 ================= */
+function downloadCSV(text, name) {
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(new Blob(['\uFEFF' + text], { type: 'text/csv;charset=utf-8;' }));
+  a.download = name; document.body.appendChild(a); a.click(); a.remove();
+}
+$('download-csv').addEventListener('click', () => {
+  const r = buildRecord();
+  let c = '座位,狀態,AI偵測,前景比例\n';
+  seats.forEach(s => {
+    const st = stateOf(s);
+    const label = st === 'present' ? '出席' : st === 'unsure' ? '待確認' : '缺席';
+    c += `"${s.id}","${label}","${s.det ? '是' : '否'}","${(s.fg * 100).toFixed(1)}%"\n`;
+  });
+  downloadCSV(c, `點名紀錄_${r.date || 'today'}.csv`);
+});
+$('export-all').addEventListener('click', async () => {
+  const rows = await dbAll();
+  let c = '日期,班級,總人數,出席人數,缺席人數,缺席名單\n';
+  rows.forEach(r => c += `"${r.date}","${r.className}",${r.total},${r.present.length},${r.absent.length},"${r.absent.join('、')}"\n`);
+  downloadCSV(c, '缺席歷史紀錄.csv');
+});
+
+/* ================= 12. Google Sheet + LINE（經由 Apps Script） ================= */
+$('gs-url').addEventListener('change', () => {});
+$('save-gs').addEventListener('click', async () => {
+  const url = $('gs-url').value.trim();
+  if (!/^https:\/\/script\.google\.com\/macros\/s\/.+\/exec/.test(url))
+    return alert('請貼上正確的 Apps Script 網址（結尾為 /exec）');
+  const r = buildRecord();
+  if (!r.date) return alert('請選擇點名日期');
+  if (!$('class-name').value) return alert('請先選擇班級');
+  const lineText = `【${r.className} 點名】${r.date}\n出席：${r.present.length} / ${r.total}\n` +
+    `缺席：${r.absent.join('、') || '全勤 🎉'}` + (r.unsure.length ? `\n待確認：${r.unsure.join('、')}` : '');
+  const payload = {
+    datetime: r.date, className: r.className, total: r.total,
+    presentCount: r.present.length, absent: r.absent,
+    sendLine: $('line-notify').checked, lineText
+  };
+  $('save-gs').disabled = true; msg('⏳ 上傳中...');
+  try {
+    const res = await fetch(url, { method: 'POST', body: JSON.stringify(payload) });
+    const j = await res.json();
+    if (j.ok) {
+      let t = '✅ 已寫入 Google Sheet';
+      if (payload.sendLine) t += j.lineSent ? '，LINE 通知已送出' : `，但 LINE 通知失敗：${j.lineError || '未知錯誤'}`;
+      msg(t, j.lineSent === false && payload.sendLine ? '#e67e00' : 'green');
+    } else msg('❌ 伺服器錯誤：' + j.error, 'red');
+  } catch (err) {
+    try {
+      await fetch(url, { method: 'POST', mode: 'no-cors', body: JSON.stringify(payload) });
+      msg('已送出，但無法確認回應，請到試算表檢查。', '#e67e00');
+    } catch (e2) { msg('❌ 上傳失敗：' + e2, 'red'); }
+  }
+  updateEnable();
+});
+
+/* ================= 啟動 ================= */
+updateSeatList();
+setMode('seat');
+initDB().then(loadHistory);
+loadOpenCV();
+</script>
+</body>
+</html>
